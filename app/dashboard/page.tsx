@@ -60,9 +60,9 @@ export default function DashboardPage() {
               className="w-full justify-start gap-2"
               asChild
             >
-              <Link href="/community">
+              <Link href="/communities">
                 <Users2 className="h-4 w-4" />
-                Community Forums
+                Communities
               </Link>
             </Button>
             <Button

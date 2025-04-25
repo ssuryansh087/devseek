@@ -366,9 +366,11 @@ export default function ProfilePage() {
                           />
                           <AvatarFallback className="text-2xl">
                             {user.name
-                              .split(" ")
-                              .map((n) => n[0])
-                              .join("")}
+                              ? user.name
+                                  .split(" ")
+                                  .map((n) => n[0])
+                                  .join("")
+                              : "U"}
                           </AvatarFallback>
                         </Avatar>
                         {isEditing && (
@@ -414,25 +416,26 @@ export default function ProfilePage() {
                             <span>Skills</span>
                           </div>
                           <div className="flex flex-wrap gap-2">
-                            {(isEditing ? editedUser.tags : user.tags).map(
-                              (tag) => (
-                                <Badge
-                                  key={tag}
-                                  variant="outline"
-                                  className="bg-primary/10"
-                                >
-                                  {tag}
-                                  {isEditing && (
-                                    <button
-                                      onClick={() => handleTagRemove(tag)}
-                                      className="ml-1 text-muted-foreground hover:text-foreground"
-                                    >
-                                      <X className="h-3 w-3" />
-                                    </button>
-                                  )}
-                                </Badge>
-                              )
-                            )}
+                            {(isEditing
+                              ? editedUser.tags || []
+                              : user.tags || []
+                            ).map((tag) => (
+                              <Badge
+                                key={tag}
+                                variant="outline"
+                                className="bg-primary/10"
+                              >
+                                {tag}
+                                {isEditing && (
+                                  <button
+                                    onClick={() => handleTagRemove(tag)}
+                                    className="ml-1 text-muted-foreground hover:text-foreground"
+                                  >
+                                    <X className="h-3 w-3" />
+                                  </button>
+                                )}
+                              </Badge>
+                            ))}
                           </div>
                         </div>
                         {!isEditing && (

@@ -56,7 +56,10 @@ import {
   writeBatch,
   increment,
   serverTimestamp,
+  setDoc,
+  orderBy, // Added for potential sorting
 } from "firebase/firestore";
+import { formatDistanceToNow } from "date-fns";
 
 interface Post {
   id: string;
@@ -70,8 +73,8 @@ interface Post {
   downvotes: number;
   upvotedBy: string[];
   downvotedBy: string[];
-  createdAt: Date | null;
-  commentsCount?: number;
+  createdAt: any; // Use 'any' or a Firestore Timestamp type if specific typing needed
+  commentsCount: number; // Ensure this is part of the interface
 }
 
 interface NewPost {
@@ -185,67 +188,127 @@ export default function FrontendCommunityPage({ params }: PageParams) {
   const [isJoiningOrLeaving, setIsJoiningOrLeaving] = useState(false);
   const [user, setUser] = useState<User | null>(null);
   const [isCreatePostDialogOpen, setIsCreatePostDialogOpen] = useState(false);
+  const [isLoadingPosts, setIsLoadingPosts] = useState(true); // Added loading state
   const { toast } = useToast();
 
   const unwrappedParams = use(
     params as unknown as Usable<{ communityName: string }>
   );
   const { communityName } = unwrappedParams;
-  const communityInfo = COMMUNITIES[communityName] || COMMUNITIES.frontend;
+  const communityInfo = COMMUNITIES[communityName] || COMMUNITIES.frontend; // Default to frontend if name invalid
 
+  // --- Authentication and Membership Check Effect ---
   useEffect(() => {
     const unsubscribe = onAuthStateChanged(auth, (currentUser) => {
       setUser(currentUser);
       if (currentUser) {
         checkMembership(currentUser.uid);
       } else {
-        setIsJoined(false);
+        setIsJoined(false); // Reset membership if user logs out
       }
     });
+    return () => unsubscribe(); // Cleanup on unmount
+  }, [communityName]); // Rerun if communityName changes (though unlikely in this structure)
 
+  // --- Fetch Posts Effect ---
+  useEffect(() => {
     fetchPosts();
-
-    return () => unsubscribe();
-  }, []);
+  }, [communityName]); // Fetch posts when community changes
 
   const checkMembership = async (userId: string) => {
-    if (!userId) return;
+    if (!userId || !communityName) return;
     try {
       const userRef = doc(db, "users", userId);
       const userDoc = await getDoc(userRef);
       if (userDoc.exists()) {
         const userData = userDoc.data();
-        setIsJoined(userData.communities?.includes(communityName) || false);
+        // Ensure communities field exists and is an array before checking
+        setIsJoined(
+          Array.isArray(userData.communities) &&
+            userData.communities.includes(communityName)
+        );
       } else {
+        // User document doesn't exist, so they haven't joined any community yet
         setIsJoined(false);
       }
     } catch (error) {
       console.error("Error checking membership:", error);
-      setIsJoined(false);
-      toast({
-        title: "Error",
-        description: "Could not verify community membership.",
-        variant: "destructive",
-      });
+      setIsJoined(false); // Assume not joined on error
+      // Avoid showing toast for a common scenario like doc not existing initially
+      // toast({
+      //   title: "Error",
+      //   description: "Could not verify community membership.",
+      //   variant: "destructive",
+      // });
     }
   };
 
   const fetchPosts = async () => {
+    setIsLoadingPosts(true); // Start loading
     try {
       const postsQuery = query(
         collection(db, "posts"),
-        where("community", "==", communityName)
+        where("community", "==", communityName),
+        orderBy("createdAt", "desc") // Order posts by creation time, newest first
       );
       const querySnapshot = await getDocs(postsQuery);
-      const postsData = querySnapshot.docs.map((doc) => ({
-        id: doc.id,
-        ...(doc.data() as Omit<Post, "id">),
-      }));
-      postsData.forEach((post) => {
-        post.upvotedBy = post.upvotedBy || [];
-        post.downvotedBy = post.downvotedBy || [];
+
+      // Map initial post data and create promises to fetch comment counts
+      const postsDataPromises = querySnapshot.docs.map(async (postDoc) => {
+        const postData = postDoc.data();
+        const postBase = {
+          id: postDoc.id,
+          title: postData.title || "",
+          content: postData.content || "",
+          imageUrl: postData.imageUrl || "",
+          authorId: postData.authorId || "",
+          authorEmail: postData.authorEmail || "Anonymous",
+          community: postData.community || "",
+          upvotes: postData.upvotes || 0,
+          downvotes: postData.downvotes || 0,
+          upvotedBy: Array.isArray(postData.upvotedBy)
+            ? postData.upvotedBy
+            : [],
+          downvotedBy: Array.isArray(postData.downvotedBy)
+            ? postData.downvotedBy
+            : [],
+          createdAt: postData.createdAt?.toDate() || null, // Convert Firestore Timestamp to JS Date
+        };
+
+        // --- Fetch comment count for this specific post ---
+        // NOTE: This adds N reads, where N is the number of posts.
+        // Consider denormalization (storing count on post doc) for better performance.
+        const commentsQuery = query(
+          collection(db, "comments"), // Assuming comments are in a 'comments' collection
+          where("postId", "==", postBase.id)
+        );
+
+        try {
+          // Fetch comment documents and get the count from the snapshot size
+          const commentsSnapshot = await getDocs(commentsQuery);
+          const commentsCount = commentsSnapshot.size;
+
+          return {
+            ...postBase,
+            commentsCount: commentsCount, // Add the fetched count
+          };
+        } catch (countError) {
+          console.error(
+            `Error fetching comment count for post ${postBase.id}:`,
+            countError
+          );
+          return {
+            // Return post data even if count fails, with count 0
+            ...postBase,
+            commentsCount: 0,
+          };
+        }
       });
-      setPosts(postsData);
+
+      // Wait for all comment count fetches to complete
+      const postsWithCounts = await Promise.all(postsDataPromises);
+
+      setPosts(postsWithCounts as Post[]); // Set state with posts including comment counts
     } catch (error) {
       console.error("Error fetching posts:", error);
       toast({
@@ -253,6 +316,9 @@ export default function FrontendCommunityPage({ params }: PageParams) {
         description: "Failed to load posts.",
         variant: "destructive",
       });
+      setPosts([]); // Clear posts on error
+    } finally {
+      setIsLoadingPosts(false); // Finish loading
     }
   };
 
@@ -268,9 +334,18 @@ export default function FrontendCommunityPage({ params }: PageParams) {
     setIsJoiningOrLeaving(true);
     try {
       const userRef = doc(db, "users", user.uid);
-      await updateDoc(userRef, {
-        communities: arrayUnion(communityName),
-      });
+      // Use setDoc with merge: true to handle document creation or update
+      await setDoc(
+        userRef,
+        {
+          // It's good practice to store basic info when creating the doc
+          uid: user.uid,
+          email: user.email,
+          communities: arrayUnion(communityName),
+        },
+        { merge: true } // Creates doc if not exists, merges if exists
+      );
+
       setIsJoined(true);
       toast({ title: "Success", description: `Joined ${communityInfo.name}!` });
     } catch (error) {
@@ -286,11 +361,13 @@ export default function FrontendCommunityPage({ params }: PageParams) {
   };
 
   const handleLeave = async () => {
-    if (!user) return;
+    if (!user) return; // Should not happen if button is shown correctly, but good check
 
     setIsJoiningOrLeaving(true);
     try {
       const userRef = doc(db, "users", user.uid);
+      // Update requires the document to exist. If it might not, check first or use setDoc with merge.
+      // However, logically, a user must have joined (doc exists) to leave.
       await updateDoc(userRef, {
         communities: arrayRemove(communityName),
       });
@@ -300,12 +377,22 @@ export default function FrontendCommunityPage({ params }: PageParams) {
         description: `You left ${communityInfo.name}.`,
       });
     } catch (error) {
+      // Handle potential error where doc doesn't exist, though unlikely for 'leave'
       console.error("Error leaving community:", error);
-      toast({
-        title: "Error",
-        description: "Failed to leave. Please try again.",
-        variant: "destructive",
-      });
+      if ((error as any)?.code === "not-found") {
+        toast({
+          title: "Error",
+          description: "User data not found. Could not leave community.",
+          variant: "destructive",
+        });
+        setIsJoined(false); // Correct state if doc was missing
+      } else {
+        toast({
+          title: "Error",
+          description: "Failed to leave. Please try again.",
+          variant: "destructive",
+        });
+      }
     } finally {
       setIsJoiningOrLeaving(false);
     }
@@ -313,7 +400,9 @@ export default function FrontendCommunityPage({ params }: PageParams) {
 
   const handleImageChange = (event: ChangeEvent<HTMLInputElement>) => {
     if (event.target.files && event.target.files[0]) {
-      setImageFile(event.target.files[0]);
+      const file = event.target.files[0];
+      // Optional: Add validation for file size or type here
+      setImageFile(file);
     } else {
       setImageFile(null);
     }
@@ -322,19 +411,24 @@ export default function FrontendCommunityPage({ params }: PageParams) {
   const uploadImageToCloudinary = async (
     file: File
   ): Promise<string | null> => {
-    const CLOUD_NAME = "dveyq6ldw";
-    const UPLOAD_PRESET = "devseekpreset";
+    // Keep your Cloudinary logic as is, but ensure CLOUD_NAME and UPLOAD_PRESET are correct
+    const CLOUD_NAME =
+      process.env.NEXT_PUBLIC_CLOUDINARY_CLOUD_NAME || "dveyq6ldw"; // Use env variables if possible
+    const UPLOAD_PRESET =
+      process.env.NEXT_PUBLIC_CLOUDINARY_UPLOAD_PRESET || "devseekpreset"; // Use env variables if possible
 
-    if (CLOUD_NAME !== "dveyq6ldw" || UPLOAD_PRESET !== "devseekpreset") {
+    if (
+      !CLOUD_NAME ||
+      !UPLOAD_PRESET ||
+      CLOUD_NAME === "YOUR_CLOUD_NAME" ||
+      UPLOAD_PRESET === "YOUR_UPLOAD_PRESET"
+    ) {
       toast({
         title: "Configuration Error",
-        description:
-          "Cloudinary details missing in FrontendCommunityPage component.",
+        description: "Cloudinary environment variables not set.",
         variant: "destructive",
       });
-      console.error(
-        "Cloudinary CLOUD_NAME or UPLOAD_PRESET not configured in the code."
-      );
+      console.error("Cloudinary CLOUD_NAME or UPLOAD_PRESET not configured.");
       return null;
     }
 
@@ -371,7 +465,7 @@ export default function FrontendCommunityPage({ params }: PageParams) {
     if (!user) {
       toast({
         title: "Authentication required",
-        description: "Please sign in.",
+        description: "Please sign in to create a post.",
         variant: "destructive",
       });
       return;
@@ -379,7 +473,7 @@ export default function FrontendCommunityPage({ params }: PageParams) {
     if (!isJoined) {
       toast({
         title: "Join required",
-        description: "Join the community to post.",
+        description: `You must join ${communityInfo.name} to post.`,
         variant: "destructive",
       });
       return;
@@ -387,7 +481,7 @@ export default function FrontendCommunityPage({ params }: PageParams) {
     if (!newPost.title.trim() || !newPost.content.trim()) {
       toast({
         title: "Missing Fields",
-        description: "Title and content are required.",
+        description: "Post title and content cannot be empty.",
         variant: "destructive",
       });
       return;
@@ -417,23 +511,27 @@ export default function FrontendCommunityPage({ params }: PageParams) {
         upvotedBy: [],
         downvotedBy: [],
         createdAt: serverTimestamp(),
+        commentsCount: 0,
       });
 
       setNewPost({ title: "", content: "" });
       setImageFile(null);
+      const fileInput = document.getElementById(
+        "imageUpload"
+      ) as HTMLInputElement | null;
+      if (fileInput) fileInput.value = "";
       setIsCreatePostDialogOpen(false);
       await fetchPosts();
-      toast({ title: "Success", description: "Post created!" });
+      toast({ title: "Success", description: "Your post has been created!" });
     } catch (error) {
       console.error("Error creating post:", error);
       toast({
         title: "Error",
-        description: "Failed to create post.",
+        description: "Failed to create post. Please try again.",
         variant: "destructive",
       });
     } finally {
       setIsCreatingPost(false);
-      if (isUploading) setIsUploading(false);
     }
   };
 
@@ -450,13 +548,17 @@ export default function FrontendCommunityPage({ params }: PageParams) {
       return;
     }
 
+    if (isVoting[postId]) return;
+
     setIsVoting((prev) => ({ ...prev, [postId]: true }));
 
     const postRef = doc(db, "posts", postId);
     const userId = user.uid;
 
     try {
+      const batch = writeBatch(db);
       const postDoc = await getDoc(postRef);
+
       if (!postDoc.exists()) {
         throw new Error("Post not found");
       }
@@ -464,11 +566,8 @@ export default function FrontendCommunityPage({ params }: PageParams) {
       const postData = postDoc.data() as Post;
       const upvotedBy = postData.upvotedBy || [];
       const downvotedBy = postData.downvotedBy || [];
-
       const hasUpvoted = upvotedBy.includes(userId);
       const hasDownvoted = downvotedBy.includes(userId);
-
-      const batch = writeBatch(db);
 
       if (voteType === "upvote") {
         if (hasUpvoted) {
@@ -509,14 +608,16 @@ export default function FrontendCommunityPage({ params }: PageParams) {
       }
 
       await batch.commit();
+
       await fetchPosts();
     } catch (error) {
       console.error("Error voting:", error);
       toast({
         title: "Error",
-        description: "Failed to vote.",
+        description: "Failed to register vote. Please try again.",
         variant: "destructive",
       });
+      await fetchPosts();
     } finally {
       setIsVoting((prev) => ({ ...prev, [postId]: false }));
     }
@@ -528,7 +629,6 @@ export default function FrontendCommunityPage({ params }: PageParams) {
 
       <div className="container mx-auto px-4 py-6 mt-16 max-w-7xl">
         <div className="grid grid-cols-1 md:grid-cols-12 gap-6">
-          {/* Left Sidebar */}
           <div className="hidden md:block md:col-span-2">
             <div className="sticky top-20 w-full space-y-2">
               <Link
@@ -548,38 +648,50 @@ export default function FrontendCommunityPage({ params }: PageParams) {
             </div>
           </div>
 
-          {/* Main Content */}
           <div className="col-span-12 md:col-span-7">
             <div className="space-y-4">
-              {posts.length === 0 && (
-                <Card className="p-4 text-center text-muted-foreground">
-                  No posts yet. Be the first!
+              {isLoadingPosts && (
+                <div className="flex justify-center items-center py-10">
+                  <Loader2 className="h-8 w-8 animate-spin text-primary" />
+                </div>
+              )}
+
+              {!isLoadingPosts && posts.length === 0 && (
+                <Card className="p-6 text-center text-muted-foreground">
+                  No posts found in {communityInfo.name} yet.
+                  {user && isJoined && " Why not create the first one?"}
+                  {user && !isJoined && " Join the community to create a post!"}
+                  {!user && " Log in and join the community to post!"}
                 </Card>
               )}
 
-              {posts.map((post) => {
-                const userVote = user
-                  ? post.upvotedBy?.includes(user.uid)
-                    ? "up"
-                    : post.downvotedBy?.includes(user.uid)
-                    ? "down"
-                    : null
-                  : null;
-                const voteScore = (post.upvotes || 0) - (post.downvotes || 0);
+              {!isLoadingPosts &&
+                posts.map((post) => {
+                  const userVote = user
+                    ? post.upvotedBy?.includes(user.uid)
+                      ? "up"
+                      : post.downvotedBy?.includes(user.uid)
+                      ? "down"
+                      : null
+                    : null;
+                  const voteScore = (post.upvotes || 0) - (post.downvotes || 0);
 
-                return (
-                  <motion.div
-                    key={post.id}
-                    initial={{ opacity: 0, y: 15 }}
-                    animate={{ opacity: 1, y: 0 }}
-                    transition={{ duration: 0.3 }}
-                  >
-                    <Link href={`/dev/${communityName}/post/${post.id}`}>
-                      <Card className="p-4 hover:shadow-md transition-shadow overflow-hidden cursor-pointer">
-                        <div className="flex gap-3 sm:gap-4">
-                          {/* Vote Controls */}
+                  return (
+                    <motion.div
+                      key={post.id}
+                      initial={{ opacity: 0, y: 15 }}
+                      animate={{ opacity: 1, y: 0 }}
+                      transition={{ duration: 0.3, ease: "easeOut" }}
+                      layout
+                    >
+                      <Link
+                        href={`/dev/${communityName}/post/${post.id}`}
+                        passHref
+                      >
+                        <Card className="p-0 hover:shadow-lg transition-shadow duration-200 overflow-hidden cursor-pointer flex">
+                          {" "}
                           <div
-                            className="flex flex-col items-center gap-1 pt-1 flex-shrink-0"
+                            className="flex flex-col items-center gap-1 p-3 bg-muted/30 flex-shrink-0"
                             onClick={(e) => {
                               e.preventDefault();
                               e.stopPropagation();
@@ -589,15 +701,17 @@ export default function FrontendCommunityPage({ params }: PageParams) {
                               variant="ghost"
                               size="sm"
                               aria-label="Upvote"
+                              title="Upvote"
                               onClick={(e) => {
                                 e.preventDefault();
                                 handleVote(post.id, "upvote");
                               }}
                               disabled={isVoting[post.id] || !user}
-                              className={`p-1 h-auto ${
+                              className={`p-1 h-auto rounded-md ${
+                                // Rounded corners
                                 userVote === "up"
-                                  ? "text-green-600"
-                                  : "text-muted-foreground hover:text-green-500"
+                                  ? "text-primary hover:bg-primary/10"
+                                  : "text-muted-foreground hover:text-primary hover:bg-primary/10"
                               }`}
                             >
                               {isVoting[post.id] ? (
@@ -607,7 +721,8 @@ export default function FrontendCommunityPage({ params }: PageParams) {
                               )}
                             </Button>
 
-                            <span className="font-bold text-sm select-none">
+                            <span className="font-bold text-sm select-none py-1">
+                              {" "}
                               {voteScore}
                             </span>
 
@@ -615,15 +730,16 @@ export default function FrontendCommunityPage({ params }: PageParams) {
                               variant="ghost"
                               size="sm"
                               aria-label="Downvote"
+                              title="Downvote"
                               onClick={(e) => {
                                 e.preventDefault();
                                 handleVote(post.id, "downvote");
                               }}
                               disabled={isVoting[post.id] || !user}
-                              className={`p-1 h-auto ${
+                              className={`p-1 h-auto rounded-md ${
                                 userVote === "down"
-                                  ? "text-red-600"
-                                  : "text-muted-foreground hover:text-red-500"
+                                  ? "text-destructive hover:bg-destructive/10"
+                                  : "text-muted-foreground hover:text-destructive hover:bg-destructive/10"
                               }`}
                             >
                               {isVoting[post.id] ? (
@@ -633,49 +749,65 @@ export default function FrontendCommunityPage({ params }: PageParams) {
                               )}
                             </Button>
                           </div>
-
-                          {/* Post Content */}
-                          <div className="flex-1 min-w-0">
-                            <h3 className="text-base sm:text-lg font-semibold mb-1 break-words">
+                          <div className="flex-1 min-w-0 p-4">
+                            {" "}
+                            <div className="text-xs text-muted-foreground mb-2">
+                              Posted by{" "}
+                              <span className="font-medium text-foreground">
+                                {post.authorEmail}
+                              </span>{" "}
+                              {post.createdAt && (
+                                <>
+                                  •{" "}
+                                  {formatDistanceToNow(post.createdAt, {
+                                    addSuffix: true,
+                                  })}
+                                </>
+                              )}
+                            </div>
+                            <h3 className="text-lg sm:text-xl font-semibold mb-2 break-words line-clamp-2">
+                              {" "}
                               {post.title}
                             </h3>
-                            <p className="text-sm text-muted-foreground mb-3 break-words">
-                              {post.content}
-                            </p>
+                            {!post.imageUrl && (
+                              <p className="text-sm text-muted-foreground mb-3 break-words line-clamp-3">
+                                {" "}
+                                {post.content}
+                              </p>
+                            )}
                             {post.imageUrl && (
-                              <div className="my-3 overflow-hidden rounded-md w-full">
+                              <div className="my-3 max-h-[400px] overflow-hidden rounded-md w-full flex justify-center items-center bg-muted">
+                                {" "}
                                 <Image
                                   src={post.imageUrl}
                                   alt={post.title || "Post image"}
-                                  width={0}
-                                  height={0}
-                                  sizes="(max-width: 768px) 90vw, (max-width: 1200px) 50vw, 600px"
-                                  className="object-cover w-full h-auto rounded-md"
+                                  width={500}
+                                  height={400}
+                                  className="object-contain w-auto h-auto max-w-full max-h-[400px] rounded-md"
                                   priority={false}
                                 />
                               </div>
                             )}
-                            <div className="flex items-center gap-3 text-xs text-muted-foreground mt-2">
-                              <span>Posted by {post.authorEmail}</span>
-                              <div className="flex items-center gap-1">
-                                <MessageSquare className="h-3 w-3" />
-                                <span>{post.commentsCount || 0} comments</span>
+                            <div className="flex items-center gap-3 text-sm text-muted-foreground mt-3">
+                              <div className="flex items-center gap-1 hover:text-primary transition-colors">
+                                <MessageSquare className="h-4 w-4" />
+                                <span>
+                                  {post.commentsCount} comment
+                                  {post.commentsCount !== 1 ? "s" : ""}
+                                </span>
                               </div>
                             </div>
                           </div>
-                        </div>
-                      </Card>
-                    </Link>
-                  </motion.div>
-                );
-              })}
+                        </Card>
+                      </Link>
+                    </motion.div>
+                  );
+                })}
             </div>
           </div>
 
-          {/* Right Sidebar */}
           <div className="col-span-12 md:col-span-3">
             <div className="sticky top-20 w-full space-y-4">
-              {/* Community Info Card */}
               <Card className="p-4">
                 <h2 className="text-lg sm:text-xl font-bold mb-2">
                   {communityInfo.name}
@@ -683,7 +815,7 @@ export default function FrontendCommunityPage({ params }: PageParams) {
                 <p className="text-sm text-muted-foreground mb-4">
                   {communityInfo.description}
                 </p>
-                <div className="flex items-center gap-4 mb-4 text-sm">
+                <div className="flex items-center gap-4 mb-4 text-sm border-b pb-4">
                   <div>
                     <div className="font-bold">
                       {communityInfo.members.toLocaleString()}
@@ -696,8 +828,20 @@ export default function FrontendCommunityPage({ params }: PageParams) {
                   </div>
                 </div>
 
-                {/* Join/Leave Button */}
-                {user && isJoined ? (
+                {!user ? (
+                  <Button
+                    className="w-full"
+                    onClick={() => {
+                      toast({
+                        title: "Please log in",
+                        description:
+                          "Log in or sign up to join communities and post.",
+                      });
+                    }}
+                  >
+                    Login to Join
+                  </Button>
+                ) : isJoined ? (
                   <AlertDialog>
                     <AlertDialogTrigger asChild>
                       <Button
@@ -717,15 +861,21 @@ export default function FrontendCommunityPage({ params }: PageParams) {
                           Leave {communityInfo.name}?
                         </AlertDialogTitle>
                         <AlertDialogDescription>
-                          Are you sure? You can always rejoin later.
+                          You will no longer be a member of this community, but
+                          you can rejoin anytime.
                         </AlertDialogDescription>
                       </AlertDialogHeader>
                       <AlertDialogFooter>
-                        <AlertDialogCancel>Cancel</AlertDialogCancel>
+                        <AlertDialogCancel disabled={isJoiningOrLeaving}>
+                          Cancel
+                        </AlertDialogCancel>
                         <AlertDialogAction
                           onClick={handleLeave}
                           disabled={isJoiningOrLeaving}
                         >
+                          {isJoiningOrLeaving ? (
+                            <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                          ) : null}
                           Leave Community
                         </AlertDialogAction>
                       </AlertDialogFooter>
@@ -735,121 +885,146 @@ export default function FrontendCommunityPage({ params }: PageParams) {
                   <Button
                     className="w-full"
                     onClick={handleJoin}
-                    disabled={isJoiningOrLeaving || !user}
+                    disabled={isJoiningOrLeaving}
                   >
                     {isJoiningOrLeaving ? (
                       <Loader2 className="mr-2 h-4 w-4 animate-spin" />
                     ) : null}
-                    {user ? "Join Community" : "Login to Join"}
+                    Join Community
                   </Button>
+                )}
+
+                {user && isJoined && (
+                  <Dialog
+                    open={isCreatePostDialogOpen}
+                    onOpenChange={setIsCreatePostDialogOpen}
+                  >
+                    <DialogTrigger asChild>
+                      <Button className="w-full mt-3" variant="outline">
+                        Create Post
+                      </Button>
+                    </DialogTrigger>
+                    <DialogContent className="sm:max-w-[600px]">
+                      <DialogHeader>
+                        <DialogTitle>
+                          Create Post in {communityInfo.name}
+                        </DialogTitle>
+                      </DialogHeader>
+                      <div className="space-y-4 py-4">
+                        <Input
+                          placeholder="Title"
+                          value={newPost.title}
+                          onChange={(e) =>
+                            setNewPost({ ...newPost, title: e.target.value })
+                          }
+                          maxLength={150}
+                          disabled={isCreatingPost || isUploading}
+                        />
+                        <Textarea
+                          placeholder="What's on your mind? (Markdown not supported yet)"
+                          className="min-h-[150px]"
+                          value={newPost.content}
+                          onChange={(e) =>
+                            setNewPost({ ...newPost, content: e.target.value })
+                          }
+                          disabled={isCreatingPost || isUploading}
+                        />
+                        <div>
+                          <label
+                            htmlFor="imageUpload"
+                            className="text-sm font-medium mb-1 block cursor-pointer"
+                          >
+                            Upload Image (Optional)
+                          </label>
+                          <Input
+                            id="imageUpload"
+                            type="file"
+                            accept="image/png, image/jpeg, image/gif, image/webp"
+                            onChange={handleImageChange}
+                            className="file:mr-4 file:py-2 file:px-4 file:rounded-full file:border-0 file:text-sm file:font-semibold file:bg-primary file:text-primary-foreground hover:file:bg-primary/90 cursor-pointer"
+                            disabled={isCreatingPost || isUploading}
+                          />
+                          {imageFile && !isUploading && (
+                            <div className="text-xs text-muted-foreground mt-2 flex items-center gap-2">
+                              <span>Selected: {imageFile.name}</span>
+                              <Button
+                                variant="ghost"
+                                size="sm"
+                                className="h-auto p-1 text-destructive hover:bg-destructive/10"
+                                onClick={() => setImageFile(null)}
+                                title="Remove image"
+                              >
+                                ✕
+                              </Button>
+                            </div>
+                          )}
+                          {isUploading && (
+                            <div className="flex items-center text-sm text-primary mt-2">
+                              <Loader2 className="mr-2 h-4 w-4 animate-spin" />{" "}
+                              Uploading image...
+                            </div>
+                          )}
+                        </div>
+                      </div>
+                      <DialogFooter>
+                        <DialogClose asChild>
+                          <Button
+                            variant="outline"
+                            disabled={isCreatingPost || isUploading}
+                          >
+                            Cancel
+                          </Button>
+                        </DialogClose>
+                        <Button
+                          onClick={handleCreatePost}
+                          disabled={
+                            isCreatingPost ||
+                            isUploading ||
+                            !newPost.title.trim() ||
+                            !newPost.content.trim()
+                          }
+                        >
+                          {isCreatingPost || isUploading ? (
+                            <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                          ) : null}
+                          {isUploading
+                            ? "Uploading..."
+                            : isCreatingPost
+                            ? "Posting..."
+                            : "Create Post"}
+                        </Button>
+                      </DialogFooter>
+                    </DialogContent>
+                  </Dialog>
                 )}
               </Card>
 
               {/* Community Rules Card */}
               <Card className="p-4">
-                <h3 className="font-semibold mb-2 text-base">
-                  Community Rules
+                <h3 className="font-semibold mb-3 text-base border-b pb-2">
+                  {" "}
+                  {/* Add border */}
+                  {communityInfo.name} Rules
                 </h3>
-                <ul className="space-y-1.5">
+                <ul className="space-y-2">
+                  {" "}
+                  {/* Increase spacing */}
                   {communityInfo.rules.map((rule, index) => (
                     <li
                       key={index}
-                      className="text-xs sm:text-sm text-muted-foreground flex"
+                      className="text-xs sm:text-sm text-muted-foreground flex items-start" // Align items start
                     >
-                      <span className="mr-2">{index + 1}.</span>
+                      <span className="mr-2 font-medium text-foreground">
+                        {index + 1}.
+                      </span>{" "}
+                      {/* Make number bold */}
                       <span>{rule}</span>
                     </li>
                   ))}
                 </ul>
               </Card>
 
-              {/* Create Post Dialog */}
-              <Dialog
-                open={isCreatePostDialogOpen}
-                onOpenChange={setIsCreatePostDialogOpen}
-              >
-                <DialogTrigger asChild>
-                  <Button
-                    className="w-full"
-                    disabled={!isJoined || !user}
-                    variant="outline"
-                  >
-                    Create Post
-                  </Button>
-                </DialogTrigger>
-                <DialogContent className="sm:max-w-[600px]">
-                  <DialogHeader>
-                    <DialogTitle>
-                      Create Post in {communityInfo.name}
-                    </DialogTitle>
-                  </DialogHeader>
-                  <div className="space-y-4 py-4">
-                    <Input
-                      placeholder="Title"
-                      value={newPost.title}
-                      onChange={(e) =>
-                        setNewPost({ ...newPost, title: e.target.value })
-                      }
-                      maxLength={150}
-                    />
-                    <Textarea
-                      placeholder="What's on your mind? (Supports Markdown)"
-                      className="min-h-[150px]"
-                      value={newPost.content}
-                      onChange={(e) =>
-                        setNewPost({ ...newPost, content: e.target.value })
-                      }
-                    />
-                    <div>
-                      <label
-                        htmlFor="imageUpload"
-                        className="text-sm font-medium mb-1 block"
-                      >
-                        Upload Image (Optional)
-                      </label>
-                      <Input
-                        id="imageUpload"
-                        type="file"
-                        accept="image/png, image/jpeg, image/gif, image/webp"
-                        onChange={handleImageChange}
-                        className="file:mr-4 file:py-2 file:px-4 file:rounded-full file:border-0 file:text-sm file:font-semibold file:bg-primary file:text-primary-foreground hover:file:bg-primary/90 cursor-pointer"
-                      />
-                      {imageFile && (
-                        <p className="text-xs text-muted-foreground mt-1">
-                          Selected: {imageFile.name}
-                        </p>
-                      )}
-                      {isUploading && (
-                        <div className="flex items-center text-sm text-muted-foreground mt-2">
-                          <Loader2 className="mr-2 h-4 w-4 animate-spin" />{" "}
-                          Uploading...
-                        </div>
-                      )}
-                    </div>
-                  </div>
-                  <DialogFooter>
-                    <DialogClose asChild>
-                      <Button variant="outline">Cancel</Button>
-                    </DialogClose>
-                    <Button
-                      onClick={handleCreatePost}
-                      disabled={
-                        isCreatingPost ||
-                        isUploading ||
-                        !newPost.title.trim() ||
-                        !newPost.content.trim()
-                      }
-                    >
-                      {isCreatingPost || isUploading ? (
-                        <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                      ) : null}
-                      {isCreatingPost || isUploading
-                        ? "Posting..."
-                        : "Create Post"}
-                    </Button>
-                  </DialogFooter>
-                </DialogContent>
-              </Dialog>
+              {/* Consider adding other sidebar elements like Related Communities, Moderators, etc. */}
             </div>
           </div>
         </div>

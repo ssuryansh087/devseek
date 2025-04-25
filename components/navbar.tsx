@@ -163,7 +163,7 @@ export function Navbar() {
             Community
           </Link>
           <Link
-            href="#progress"
+            href="/roadmap"
             className="text-sm font-medium hover:text-primary"
           >
             Progress
