@@ -115,7 +115,7 @@ export default function RoadmapGeneratorPage() {
           title: "Error",
           description: "Please sign in to save your roadmap",
         });
-        router.push("/login");
+        router.push("/signin");
         return;
       }
 

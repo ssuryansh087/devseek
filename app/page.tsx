@@ -20,6 +20,8 @@ import { useAuthState } from "react-firebase-hooks/auth";
 import { auth } from "@/lib/firebase";
 import { Footer } from "@/components/footer";
 import { Navbar } from "@/components/navbar";
+import Image from "next/image";
+import landing from "@/public/assets/landing.gif";
 
 export default function Home() {
   const [user, loading] = useAuthState(auth);
@@ -153,7 +155,9 @@ export default function Home() {
                 <Link href="/signup">Create Profile</Link>
               </Button>
             </div>
-            <div className="rounded-lg border bg-muted aspect-square" />
+            <div className="rounded-lg border bg-muted">
+              <Image src={landing} alt="Landing GIF" />
+            </div>
           </div>
         </motion.section>
 

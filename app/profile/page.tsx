@@ -116,7 +116,7 @@ export default function ProfilePage() {
       try {
         const currentUser = auth.currentUser;
         if (!currentUser) {
-          router.push("/login");
+          router.push("/signin");
           return;
         }
 

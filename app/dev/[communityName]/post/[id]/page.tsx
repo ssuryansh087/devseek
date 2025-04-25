@@ -264,7 +264,7 @@ export default function PostPage({
           title: "Error",
           description: "Please sign in to comment",
         });
-        router.push("/login");
+        router.push("/signin");
         return;
       }
 

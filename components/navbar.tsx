@@ -98,7 +98,7 @@ export function Navbar() {
       await auth.signOut();
       setUserDisplayName(null);
       setProfilePicture("/"); // Reset profile picture on logout
-      router.push("/login");
+      router.push("/signin");
       toast({
         title: "Success",
         description: "Successfully logged out",

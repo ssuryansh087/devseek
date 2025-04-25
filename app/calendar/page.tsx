@@ -123,7 +123,7 @@ export default function CalendarPage() {
         title: "Authentication required",
         description: "Please sign in to add tasks",
       });
-      router.push("/login");
+      router.push("/signin");
       return;
     }
 
