@@ -192,6 +192,7 @@ export default function MyRoadmapPage() {
 
   return (
     <div className="min-h-screen bg-background">
+      <Navbar />
       <aside className="fixed left-0 top-0 z-30 h-full w-64 border-r border-primary/10 bg-card/80 backdrop-blur-xl">
         <nav className="p-4 mt-12">
           <p className="mb-4 text-xs font-semibold uppercase text-muted-foreground">
@@ -253,8 +254,6 @@ export default function MyRoadmapPage() {
       </aside>
 
       <main className="pl-64">
-        <Navbar />
-
         <div className="container py-8 mt-12">
           <motion.div
             initial={{ opacity: 0, y: 20 }}

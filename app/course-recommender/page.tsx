@@ -25,6 +25,8 @@ import { Search, Star, Clock, BookOpen, IndianRupee } from "lucide-react";
 import Link from "next/link";
 import { Footer } from "@/components/footer";
 import { Navbar } from "@/components/navbar";
+import Image from "next/image";
+import udemyicon from "@/public/assets/udemy-icon.png";
 
 interface Course {
   id: number;
@@ -152,6 +154,10 @@ export default function CourseRecommenderPage() {
           <div className="text-center mb-12">
             <h1 className="text-4xl font-bold tracking-tight glow-text mb-4">
               Course Recommender
+            </h1>
+            <h1 className="text-xl font-bold tracking-tight glow-text mb-4 flex items-center justify-center">
+              - in Collaboration with Udemy
+              <Image src={udemyicon} alt="Udemy Icon" className="w-10 ml-2" />
             </h1>
             <p className="text-muted-foreground max-w-2xl mx-auto">
               Find the perfect course to boost your skills. Enter what you want

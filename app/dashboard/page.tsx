@@ -40,16 +40,6 @@ export default function DashboardPage() {
               className="w-full justify-start gap-2"
               asChild
             >
-              <Link href="/tasks">
-                <Calendar className="h-4 w-4" />
-                My Tasks
-              </Link>
-            </Button>
-            <Button
-              variant="ghost"
-              className="w-full justify-start gap-2"
-              asChild
-            >
               <Link href="/calendar">
                 <Calendar className="h-4 w-4" />
                 Calendar
